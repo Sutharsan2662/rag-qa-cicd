@@ -1,6 +1,7 @@
 .env
 .venv/
 venv/
+rag_qa/
 __pycache__/
 *.pyc
 .DS_Store

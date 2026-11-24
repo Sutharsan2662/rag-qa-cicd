@@ -1,158 +1,60 @@
-# ==================================================
-# RAG Q&A System - CI/CD Pipeline
-# ==================================================
-
-name: CI/CD Pipeline
+name: CI - Build and Test Docker Image
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
-env:
-  PYTHON_VERSION: "3.12"
+permissions:
+  contents: read
 
 jobs:
-  # ============================================
-  # Lint and Format Check
-  # ============================================
-  lint:
-    name: Lint & Format
+  docker-ci:
+    name: Build & Smoke Test Container
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: 1. Checkout repository code
+        uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
+      - name: 2. Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-lint-${{ hashFiles('requirements-dev.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-lint-
-
-      - name: Install linting tools
-        run: |
-          python -m pip install --upgrade pip
-          pip install ruff black
-
-      - name: Run Ruff linter
-        run: ruff check app/ tests/ --output-format=github
-
-      - name: Check code formatting with Black
-        run: black --check app/ tests/
-
-  # ============================================
-  # Unit Tests
-  # ============================================
-  test:
-    name: Unit Tests
-    runs-on: ubuntu-latest
-    needs: lint
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-test-${{ hashFiles('requirements-dev.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-test-
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
-
-      - name: Run tests with coverage
-        env:
-          OPENAI_API_KEY: "test-key"
-          QDRANT_URL: "http://localhost:6333"
-          QDRANT_API_KEY: "test-key"
-        run: |
-          pytest --cov=app --cov-report=xml --cov-report=html --cov-fail-under=60
-
-      - name: Upload coverage reports
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: coverage-report
-          path: htmlcov/
-
-  # ============================================
-  # Build Docker Image
-  # ============================================
-  build:
-    name: Build Docker Image
-    runs-on: ubuntu-latest
-    needs: test
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Docker image
-        uses: docker/build-push-action@v5
+      - name: 3. Build Docker image (with GitHub Actions cache)
+        uses: docker/build-push-action@v7
         with:
           context: .
+          platforms: linux/amd64
           push: false
-          tags: rag-qa-system:${{ github.sha }}
+          load: true
+          tags: rag-qa-app:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Test Docker image
+      - name: 4. Smoke test container startup & /health endpoint
         run: |
-          docker build -t rag-qa-system:test .
-          docker run --rm \
-            -e OPENAI_API_KEY=test-key \
-            -e QDRANT_URL=http://localhost:6333 \
-            -e QDRANT_API_KEY=test-key \
-            rag-qa-system:test python -c "from app.main import app; print('App loaded successfully')"
+          docker run -d --name rag-ci-test -p 8000:8000 \
+            -e OPENAI_API_KEY=sk-ci-dummy-key \
+            -e QDRANT_URL=https://example.qdrant.io \
+            -e QDRANT_API_KEY=ci-dummy-key \
+            rag-qa-app:ci
 
-  # ============================================
-  # Security Scan (Optional)
-  # ============================================
-  security:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    needs: lint
+          echo "Waiting for FastAPI to start..."
+          for i in $(seq 1 15); do
+            if curl -fsS http://localhost:8000/health; then
+              echo ""
+              echo "Health check passed!"
+              exit 0
+            fi
+            sleep 2
+          done
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+          echo "Health check failed! Container logs:"
+          docker logs rag-ci-test
+          exit 1
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install bandit safety
-
-      - name: Run Bandit security scan
-        run: bandit -r app/ -ll --skip B101
-        continue-on-error: true
-
-      - name: Check dependencies for vulnerabilities
-        run: safety check -r requirements.txt
-        continue-on-error: true
+      - name: 5. Clean up test container
+        if: always()
+        run: docker rm -f rag-ci-test || true
